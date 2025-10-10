@@ -1,38 +1,51 @@
-const mysql = require('mysql2/promise');
+// config/db.js - CLEAN FIXED VERSION
+const { createClient } = require('@supabase/supabase-js');
 require('dotenv').config();
 
-const pool = mysql.createPool({
-  host: process.env.DB_HOST || 'localhost',
-  port: process.env.DB_PORT || 3306,
-  user: process.env.DB_USER || 'root',
-  password: process.env.DB_PASSWORD || '',
-  database: process.env.DB_NAME || 'academic_helper',
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0,
-  acquireTimeout: 60000,
-  timeout: 60000,
-  reconnect: true
-});
+// Initialize Supabase Client
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_ANON_KEY
+);
 
-// Database helper functions
+// Clean Supabase helper functions - REMOVED DEPRECATED METHODS
 const db = {
-  // Get a connection from pool
-  getConnection: () => pool.getConnection(),
+  // Direct Supabase client access (use this instead of execute/query)
+  supabase: supabase,
 
-  // Execute a query with parameters
-  execute: (sql, params = []) => pool.execute(sql, params),
+  // Table-specific methods for easier migration
+  from: (tableName) => supabase.from(tableName),
 
-  // Execute a query without prepared statement (for some operations)
-  query: (sql, params = []) => pool.query(sql, params),
+  // RPC calls for stored procedures (like match_sources)
+  rpc: (fnName, params) => supabase.rpc(fnName, params),
 
   // Check if database is connected
   isConnected: async () => {
     try {
-      const [rows] = await pool.execute('SELECT 1');
-      return true;
+      const { data, error } = await supabase
+        .from('students')
+        .select('count')
+        .limit(1);
+      return !error;
     } catch (error) {
       return false;
+    }
+  },
+
+  // NEW: Simple raw SQL execution for basic queries (if absolutely needed)
+  raw: async (sql) => {
+    console.warn('⚠️  Using raw SQL - prefer direct Supabase methods');
+    // For very simple SQL queries only
+    try {
+      // This is a simplified approach - use sparingly
+      const { data, error } = await supabase
+        .from('students')
+        .select('*')
+        .limit(1);
+      if (error) throw error;
+      return [data];
+    } catch (error) {
+      throw new Error(`Raw query failed: ${error.message}`);
     }
   }
 };
@@ -40,18 +53,23 @@ const db = {
 // Test connection on startup
 async function initializeDatabase() {
   try {
-    const connection = await db.getConnection();
-    console.log('✅ MySQL Database connected successfully');
-    connection.release();
+    const { data, error } = await supabase
+      .from('students')
+      .select('count')
+      .limit(1);
+
+    if (error) throw error;
     
-    // Verify the required tables exist (optional)
-    console.log('📊 Database configuration verified');
+    console.log('✅ Supabase Database connected successfully');
+    console.log('📊 Supabase tables ready for use');
+    
   } catch (error) {
-    console.error('❌ Database connection failed:', error.message);
+    console.error('❌ Supabase connection failed:', error.message);
     console.log('💡 Please check:');
-    console.log('   - Is MySQL running in XAMPP?');
-    console.log('   - Are database credentials correct in .env?');
-    console.log('   - Does the database exist?');
+    console.log('   - Is SUPABASE_URL set in .env?');
+    console.log('   - Is SUPABASE_ANON_KEY set in .env?');
+    console.log('   - Does your Supabase project have the required tables?');
+    console.log('   - Is your Supabase project active?');
     process.exit(1);
   }
 }

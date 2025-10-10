@@ -1,10 +1,11 @@
-// backend/routes/upload.js
+// backend/routes/upload.js - UPDATED FOR SUPABASE
 const express = require('express');
 const router = express.Router();
 const multer = require('multer');
 const path = require('path');
 const authMiddleware = require('../middleware/authMiddleware');
 const uploadController = require('../controllers/uploadController');
+const db = require('../config/db'); // Supabase client
 
 // Configure multer for file uploads with validation
 const storage = multer.diskStorage({
@@ -75,39 +76,50 @@ router.post(
   uploadController.uploadAssignment // Process the uploaded file
 );
 
-// Optional: Route to get upload status (if you want progress tracking)
+// Optional: Route to get upload status (if you want progress tracking) - UPDATED
 router.get('/status/:assignmentId', authMiddleware, async (req, res) => {
   try {
     const assignmentId = req.params.assignmentId;
     const studentId = req.user.id;
 
     // Validate assignment ID
-    if (!assignmentId || isNaN(assignmentId)) {
+    if (!assignmentId) {
       return res.status(400).json({
         success: false,
         message: 'Invalid assignment ID'
       });
     }
 
-    const db = require('../config/db');
-    const [results] = await db.execute(
-      `SELECT a.id, a.filename, a.uploaded_at, 
-              r.analyzed_at, r.confidence_score
-       FROM assignments a
-       LEFT JOIN analysis_results r ON a.id = r.assignment_id
-       WHERE a.id = ? AND a.student_id = ?`,
-      [assignmentId, studentId]
-    );
+    // UPDATED: Supabase query
+    const { data: results, error } = await db
+      .from('assignments')
+      .select(`
+        id,
+        filename,
+        uploaded_at,
+        analysis_results (
+          analyzed_at,
+          confidence_score,
+          n8n_processed
+        )
+      `)
+      .eq('id', assignmentId)
+      .eq('student_id', studentId)
+      .single();
 
-    if (results.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Assignment not found'
-      });
+    if (error) {
+      if (error.code === 'PGRST116') {
+        return res.status(404).json({
+          success: false,
+          message: 'Assignment not found'
+        });
+      }
+      throw error;
     }
 
-    const assignment = results[0];
-    const status = assignment.analyzed_at ? 'completed' : 'processing';
+    const assignment = results;
+    const analysis = assignment.analysis_results;
+    const status = analysis && analysis.analyzed_at ? 'completed' : 'processing';
 
     res.json({
       success: true,
@@ -116,8 +128,9 @@ router.get('/status/:assignmentId', authMiddleware, async (req, res) => {
         filename: assignment.filename,
         status: status,
         uploadedAt: assignment.uploaded_at,
-        analyzedAt: assignment.analyzed_at,
-        confidenceScore: assignment.confidence_score
+        analyzedAt: analysis?.analyzed_at || null,
+        confidenceScore: analysis?.confidence_score || null,
+        n8nProcessed: analysis?.n8n_processed || false
       }
     });
   } catch (error) {
@@ -129,40 +142,48 @@ router.get('/status/:assignmentId', authMiddleware, async (req, res) => {
   }
 });
 
-// Optional: Route to delete an uploaded assignment
+// Optional: Route to delete an uploaded assignment - UPDATED
 router.delete('/:assignmentId', authMiddleware, async (req, res) => {
   try {
     const assignmentId = req.params.assignmentId;
     const studentId = req.user.id;
 
     // Validate assignment ID
-    if (!assignmentId || isNaN(assignmentId)) {
+    if (!assignmentId) {
       return res.status(400).json({
         success: false,
         message: 'Invalid assignment ID'
       });
     }
 
-    const db = require('../config/db');
-    
-    // First, verify ownership and get filename
-    const [assignments] = await db.execute(
-      'SELECT filename FROM assignments WHERE id = ? AND student_id = ?',
-      [assignmentId, studentId]
-    );
+    // UPDATED: First, verify ownership and get filename
+    const { data: assignments, error: fetchError } = await db
+      .from('assignments')
+      .select('filename')
+      .eq('id', assignmentId)
+      .eq('student_id', studentId)
+      .single();
 
-    if (assignments.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Assignment not found or access denied'
-      });
+    if (fetchError) {
+      if (fetchError.code === 'PGRST116') {
+        return res.status(404).json({
+          success: false,
+          message: 'Assignment not found or access denied'
+        });
+      }
+      throw fetchError;
     }
 
-    const filename = assignments[0].filename;
+    const filename = assignments.filename;
     const filePath = path.join(__dirname, '..', 'uploads', filename);
 
-    // Delete from database (cascade should handle analysis_results if foreign key is set up)
-    await db.execute('DELETE FROM assignments WHERE id = ?', [assignmentId]);
+    // UPDATED: Delete from database (cascade should handle analysis_results)
+    const { error: deleteError } = await db
+      .from('assignments')
+      .delete()
+      .eq('id', assignmentId);
+
+    if (deleteError) throw deleteError;
 
     // Delete the physical file
     const fs = require('fs').promises;

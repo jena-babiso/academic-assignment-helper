@@ -5,13 +5,17 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "dev": "nodemon server.js",
-    "start": "node server.js"
+    "start": "node server.js",
+    "reset-db": "node reset-database.js",
+    "setup-db": "node setup-tables.js"
   },
-  "keywords": [],
+  "keywords": ["academic", "assignment", "plagiarism", "rag", "n8n"],
   "author": "",
   "license": "ISC",
-  "description": "",
+  "description": "Academic Assignment Helper with RAG-powered plagiarism detection",
   "dependencies": {
+    "@supabase/supabase-js": "^2.38.0",
+    "axios": "^1.12.2",
     "bcrypt": "^6.0.0",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
@@ -19,7 +23,6 @@
     "jsonwebtoken": "^9.0.2",
     "mammoth": "^1.11.0",
     "multer": "^2.0.2",
-    "mysql2": "^3.15.1",
     "openai": "^6.2.0",
     "pdf-parse": "^2.1.7"
   },

@@ -1,9 +1,9 @@
-// backend/routes/analysis.js
+// backend/routes/analysis.js - COMPLETE FIXED VERSION
 const express = require('express');
 const router = express.Router();
-const db = require('../config/db');
+const db = require('../config/db'); // Supabase client
 const authMiddleware = require('../middleware/authMiddleware');
-const { callDeepSeekAPI } = require('../server'); // Import from server.js
+const { callDeepSeekAPI } = require('../server');
 
 // Remove OpenAI and add DeepSeek analysis function
 async function analyzeWithDeepSeek(text, analysisType = 'academic') {
@@ -60,7 +60,6 @@ router.post('/analyze', authMiddleware, async (req, res) => {
         const { assignmentId, analysisType = 'academic' } = req.body;
         const studentId = req.user.id;
 
-        // Validate input
         if (!assignmentId) {
             return res.status(400).json({ 
                 success: false,
@@ -69,21 +68,22 @@ router.post('/analyze', authMiddleware, async (req, res) => {
         }
 
         // Get assignment text with ownership check
-        const [assignments] = await db.execute(
-            `SELECT id, original_text, filename 
-             FROM assignments 
-             WHERE id = ? AND student_id = ?`,
-            [assignmentId, studentId]
-        );
+        const { data: assignment, error } = await db
+            .from('assignments')
+            .select('id, original_text, filename')
+            .eq('id', assignmentId)
+            .eq('student_id', studentId)
+            .single();
 
-        if (assignments.length === 0) {
-            return res.status(404).json({ 
-                success: false,
-                message: 'Assignment not found or access denied' 
-            });
+        if (error) {
+            if (error.code === 'PGRST116') {
+                return res.status(404).json({ 
+                    success: false,
+                    message: 'Assignment not found or access denied' 
+                });
+            }
+            throw error;
         }
-
-        const assignment = assignments[0];
         
         if (!assignment.original_text) {
             return res.status(400).json({ 
@@ -92,7 +92,6 @@ router.post('/analyze', authMiddleware, async (req, res) => {
             });
         }
 
-        // Check if DeepSeek API key is available
         if (!process.env.DEEPSEEK_API_KEY) {
             return res.status(500).json({ 
                 success: false,
@@ -103,16 +102,18 @@ router.post('/analyze', authMiddleware, async (req, res) => {
         // Analyze with DeepSeek
         const analysisResult = await analyzeWithDeepSeek(assignment.original_text, analysisType);
 
-        // Save analysis results to database
-        const [result] = await db.execute(
-            `INSERT INTO analysis_results 
-             (assignment_id, analysis_type, analysis_result, analyzed_at) 
-             VALUES (?, ?, ?, NOW())
-             ON DUPLICATE KEY UPDATE 
-             analysis_result = VALUES(analysis_result), 
-             analyzed_at = NOW()`,
-            [assignmentId, analysisType, analysisResult]
-        );
+        // Save analysis results to Supabase
+        const { data: result, error: insertError } = await db
+            .from('analysis_results')
+            .upsert({
+                assignment_id: assignmentId,
+                analysis_type: analysisType,
+                analysis_result: analysisResult,
+                analyzed_at: new Date().toISOString()
+            })
+            .select();
+
+        if (insertError) throw insertError;
 
         res.status(200).json({
             success: true,
@@ -134,88 +135,117 @@ router.post('/analyze', authMiddleware, async (req, res) => {
     }
 });
 
-// GET all assignments for logged-in student (keep this as is)
+// ========== DIRECT ROUTES (NO CONTROLLER NEEDED) ==========
+
+// GET all assignments for logged-in student - FIXED
 router.get('/assignments', authMiddleware, async (req, res) => {
     try {
         const studentId = req.user.id;
 
-        // Validate studentId
-        if (!studentId || isNaN(studentId)) {
-            return res.status(400).json({ 
+        if (!studentId) {
+            return res.status(400).json({
                 success: false,
-                message: 'Invalid user ID' 
+                message: 'Invalid user ID'
             });
         }
 
-        const [assignments] = await db.execute(
-            `SELECT id, filename, topic, academic_level, word_count, uploaded_at
-             FROM assignments
-             WHERE student_id = ?
-             ORDER BY uploaded_at DESC`,
-            [studentId]
-        );
+        // Direct Supabase query
+        const { data: assignments, error } = await db
+            .from('assignments')
+            .select('id, filename, topic, academic_level, word_count, uploaded_at')
+            .eq('student_id', studentId)
+            .order('uploaded_at', { ascending: false });
+
+        if (error) throw error;
 
         res.status(200).json({
             success: true,
-            count: assignments.length,
-            data: assignments
+            count: assignments ? assignments.length : 0,
+            data: assignments || []
         });
     } catch (err) {
         console.error('Error fetching assignments:', err);
-        res.status(500).json({ 
+        res.status(500).json({
             success: false,
-            message: 'Failed to fetch assignments' 
+            message: 'Failed to fetch assignments'
         });
     }
 });
 
-// GET analysis result by assignment ID (with ownership check) - UPDATED
+// GET analysis result by assignment ID - FIXED
 router.get('/:id', authMiddleware, async (req, res) => {
     try {
         const assignmentId = req.params.id;
         const studentId = req.user.id;
 
-        // Validate IDs
-        if (!assignmentId || isNaN(assignmentId)) {
-            return res.status(400).json({ 
+        if (!assignmentId) {
+            return res.status(400).json({
                 success: false,
-                message: 'Invalid assignment ID' 
+                message: 'Invalid assignment ID'
             });
         }
 
-        const [results] = await db.execute(
-            `SELECT a.id AS assignment_id, a.filename, a.original_text, a.topic, 
-                    a.academic_level, a.word_count, a.uploaded_at,
-                    r.analysis_type, r.analysis_result, r.analyzed_at
-             FROM assignments a
-             LEFT JOIN analysis_results r ON a.id = r.assignment_id
-             WHERE a.id = ? AND a.student_id = ?
-             ORDER BY r.analyzed_at DESC
-             LIMIT 1`,
-            [assignmentId, studentId]
-        );
+        // Direct Supabase query with join
+        const { data: result, error } = await db
+            .from('assignments')
+            .select(`
+                id,
+                filename,
+                original_text,
+                topic,
+                academic_level,
+                word_count,
+                uploaded_at,
+                analysis_results (
+                    suggested_sources,
+                    plagiarism_score,
+                    flagged_sections,
+                    research_suggestions,
+                    citation_recommendations,
+                    confidence_score,
+                    analyzed_at,
+                    n8n_processed
+                )
+            `)
+            .eq('id', assignmentId)
+            .eq('student_id', studentId)
+            .single();
 
-        if (results.length === 0) {
-            return res.status(404).json({ 
-                success: false,
-                message: 'Analysis not found or access denied' 
-            });
+        if (error) {
+            if (error.code === 'PGRST116') {
+                return res.status(404).json({
+                    success: false,
+                    message: 'Analysis not found or access denied'
+                });
+            }
+            throw error;
         }
 
-        const analysis = results[0];
-        
         // Handle case where analysis hasn't been processed yet
-        if (!analysis.analyzed_at) {
+        if (!result.analysis_results || !result.analysis_results.analyzed_at) {
             return res.status(202).json({
                 success: true,
-                message: 'Analysis is not yet processed',
+                message: 'Analysis is still processing',
                 data: {
-                    assignment_id: analysis.assignment_id,
-                    filename: analysis.filename,
-                    status: 'pending'
+                    assignment_id: result.id,
+                    filename: result.filename,
+                    status: 'processing',
+                    n8n_processed: result.analysis_results?.n8n_processed || false
                 }
             });
         }
+
+        // Combine assignment and analysis data
+        const analysis = {
+            assignment_id: result.id,
+            filename: result.filename,
+            original_text: result.original_text,
+            topic: result.topic,
+            academic_level: result.academic_level,
+            word_count: result.word_count,
+            uploaded_at: result.uploaded_at,
+            ...result.analysis_results
+        };
 
         res.status(200).json({
             success: true,
@@ -223,45 +253,218 @@ router.get('/:id', authMiddleware, async (req, res) => {
         });
     } catch (err) {
         console.error('Error fetching analysis:', err);
-        res.status(500).json({ 
+        res.status(500).json({
             success: false,
-            message: 'Failed to fetch analysis' 
+            message: 'Failed to fetch analysis'
         });
     }
 });
 
-// GET analysis statistics for dashboard (keep this as is)
+// GET analysis statistics for dashboard - FIXED
 router.get('/stats/dashboard', authMiddleware, async (req, res) => {
     try {
         const studentId = req.user.id;
 
-        const [stats] = await db.execute(
-            `SELECT 
-                COUNT(*) as total_assignments,
-                COUNT(r.id) as analyzed_count,
-                AVG(LENGTH(r.analysis_result)) as avg_analysis_length
-             FROM assignments a
-             LEFT JOIN analysis_results r ON a.id = r.assignment_id
-             WHERE a.student_id = ?`,
-            [studentId]
-        );
+        // Multiple Supabase queries for stats
+        const [
+            assignmentsCount,
+            analysisCount,
+            plagiarismStats,
+            confidenceStats
+        ] = await Promise.all([
+            // Total assignments count
+            db
+                .from('assignments')
+                .select('id', { count: 'exact', head: true })
+                .eq('student_id', studentId),
 
-        const [recentAssignments] = await db.execute(
-            `SELECT a.id, a.filename, a.uploaded_at, r.analyzed_at
-             FROM assignments a
-             LEFT JOIN analysis_results r ON a.id = r.assignment_id
-             WHERE a.student_id = ?
-             ORDER BY a.uploaded_at DESC
-             LIMIT 5`,
-            [studentId]
-        );
+            // Analyzed assignments count
+            db
+                .from('analysis_results')
+                .select('id', { count: 'exact', head: true })
+                .eq('assignments.student_id', studentId),
+
+            // Average plagiarism score
+            db
+                .from('analysis_results')
+                .select('plagiarism_score')
+                .eq('assignments.student_id', studentId)
+                .not('plagiarism_score', 'is', null),
+
+            // Best confidence score
+            db
+                .from('analysis_results')
+                .select('confidence_score')
+                .eq('assignments.student_id', studentId)
+                .not('confidence_score', 'is', null)
+                .order('confidence_score', { ascending: false })
+                .limit(1)
+        ]);
+
+        // Calculate statistics
+        const totalAssignments = assignmentsCount.count || 0;
+        const analyzedCount = analysisCount.count || 0;
+
+        // Calculate average plagiarism score
+        let avgPlagiarismScore = 0;
+        if (plagiarismStats.data && plagiarismStats.data.length > 0) {
+            const total = plagiarismStats.data.reduce((sum, item) => sum + item.plagiarism_score, 0);
+            avgPlagiarismScore = total / plagiarismStats.data.length;
+        }
+
+        // Get best confidence score
+        const bestConfidenceScore = confidenceStats.data && confidenceStats.data.length > 0
+            ? confidenceStats.data[0].confidence_score
+            : 0;
+
+        const stats = {
+            total_assignments: totalAssignments,
+            analyzed_count: analyzedCount,
+            avg_plagiarism_score: parseFloat(avgPlagiarismScore.toFixed(2)),
+            best_confidence_score: parseFloat(bestConfidenceScore.toFixed(2))
+        };
 
         res.status(200).json({
             success: true,
-            data: {
-                ...stats[0],
-                recent_assignments: recentAssignments
+            data: stats
+        });
+    } catch (err) {
+        console.error('Error fetching stats:', err);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to fetch statistics'
+        });
+    }
+});
+
+// ========== NEW ROUTES ==========
+
+// Search academic sources using RAG
+router.get('/sources/search', authMiddleware, async (req, res) => {
+    try {
+        const { query } = req.query;
+
+        if (!query) {
+            return res.status(400).json({
+                success: false,
+                message: 'Query parameter is required'
+            });
+        }
+
+        // Search academic sources from Supabase
+        const { data: sources, error } = await db
+            .from('academic_sources')
+            .select('id, title, authors, publication_year, abstract, source_type')
+            .or(`title.ilike.%${query}%,abstract.ilike.%${query}%,authors.ilike.%${query}%`)
+            .limit(10);
+
+        if (error) throw error;
+
+        res.status(200).json({
+            success: true,
+            count: sources ? sources.length : 0,
+            query: query,
+            data: sources || []
+        });
+    } catch (err) {
+        console.error('Error searching sources:', err);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to search academic sources'
+        });
+    }
+});
+
+// GET all analyses with pagination
+router.get('/', authMiddleware, async (req, res) => {
+    try {
+        const studentId = req.user.id;
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 10;
+        const offset = (page - 1) * limit;
+
+        // Get analyses with pagination
+        const { data: analyses, error, count } = await db
+            .from('assignments')
+            .select(`
+                id,
+                filename,
+                topic,
+                academic_level,
+                word_count,
+                uploaded_at,
+                analysis_results (
+                    plagiarism_score,
+                    confidence_score,
+                    analyzed_at
+                )
+            `, { count: 'exact' })
+            .eq('student_id', studentId)
+            .order('uploaded_at', { ascending: false })
+            .range(offset, offset + limit - 1);
+
+        if (error) throw error;
+
+        res.status(200).json({
+            success: true,
+            data: analyses || [],
+            pagination: {
+                page,
+                limit,
+                total: count || 0,
+                pages: Math.ceil((count || 0) / limit)
             }
+        });
+    } catch (err) {
+        console.error('Error fetching analyses:', err);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to fetch analyses'
+        });
+    }
+});
+
+// GET analysis statistics for dashboard (alternative version)
+router.get('/stats/summary', authMiddleware, async (req, res) => {
+    try {
+        const studentId = req.user.id;
+
+        // Get stats using multiple Supabase queries
+        const [
+            assignmentsCount,
+            analysisCount,
+            recentAssignments
+        ] = await Promise.all([
+            // Total assignments count
+            db
+                .from('assignments')
+                .select('id', { count: 'exact', head: true })
+                .eq('student_id', studentId),
+            
+            // Analyzed assignments count
+            db
+                .from('analysis_results')
+                .select('id', { count: 'exact', head: true })
+                .eq('assignments.student_id', studentId),
+            
+            // Recent assignments
+            db
+                .from('assignments')
+                .select('id, filename, uploaded_at, analysis_results (analyzed_at)')
+                .eq('student_id', studentId)
+                .order('uploaded_at', { ascending: false })
+                .limit(5)
+        ]);
+
+        const stats = {
+            total_assignments: assignmentsCount.count || 0,
+            analyzed_count: analysisCount.count || 0,
+            recent_assignments: recentAssignments.data || []
+        };
+
+        res.status(200).json({
+            success: true,
+            data: stats
         });
     } catch (err) {
         console.error('Error fetching stats:', err);

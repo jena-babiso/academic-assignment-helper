@@ -1,7 +1,7 @@
 // backend/controllers/authController.js
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-const db = require('../config/db');
+const db = require('../config/db'); // This now exports Supabase client
 
 // Email validation helper
 const isValidEmail = (email) => {
@@ -17,7 +17,7 @@ const isStrongPassword = (password) => {
 exports.register = async (req, res) => {
   const { full_name, email, password, student_id } = req.body;
 
-  // Enhanced validation
+  // Enhanced validation (unchanged)
   if (!full_name || !email || !password || !student_id) {
     return res.status(400).json({ 
       success: false,
@@ -40,48 +40,67 @@ exports.register = async (req, res) => {
   }
 
   try {
-    // Check if email already exists
-    const [existingEmail] = await db.execute(
-      "SELECT id FROM students WHERE email = ?", 
-      [email]
-    );
-    
-    if (existingEmail.length > 0) {
+    // Check if email already exists - UPDATED for Supabase
+    const { data: existingEmail, error: emailError } = await db
+      .from('students')
+      .select('id')
+      .eq('email', email.toLowerCase().trim())
+      .single();
+
+    if (emailError && emailError.code !== 'PGRST116') { // PGRST116 = no rows returned
+      throw emailError;
+    }
+
+    if (existingEmail) {
       return res.status(409).json({ 
         success: false,
         message: "Email already registered" 
       });
     }
 
-    // Check if student_id already exists
-    const [existingStudentId] = await db.execute(
-      "SELECT id FROM students WHERE student_id = ?", 
-      [student_id]
-    );
-    
-    if (existingStudentId.length > 0) {
+    // Check if student_id already exists - UPDATED for Supabase
+    const { data: existingStudentId, error: studentIdError } = await db
+      .from('students')
+      .select('id')
+      .eq('student_id', student_id.trim())
+      .single();
+
+    if (studentIdError && studentIdError.code !== 'PGRST116') {
+      throw studentIdError;
+    }
+
+    if (existingStudentId) {
       return res.status(409).json({ 
         success: false,
         message: "Student ID already registered" 
       });
     }
 
-    const hashedPassword = await bcrypt.hash(password, 12); // Increased salt rounds
+    const hashedPassword = await bcrypt.hash(password, 12);
 
-    const [result] = await db.execute(
-      "INSERT INTO students (full_name, email, password_hash, student_id) VALUES (?, ?, ?, ?)",
-      [full_name.trim(), email.toLowerCase().trim(), hashedPassword, student_id.trim()]
-    );
+    // Insert new user - UPDATED for Supabase
+    const { data: newUser, error: insertError } = await db
+      .from('students')
+      .insert([{
+        full_name: full_name.trim(),
+        email: email.toLowerCase().trim(),
+        password_hash: hashedPassword,
+        student_id: student_id.trim()
+      }])
+      .select()
+      .single();
+
+    if (insertError) throw insertError;
 
     // Generate token immediately after registration
     const token = jwt.sign(
       { 
-        id: result.insertId, 
-        email: email,
-        student_id: student_id
+        id: newUser.id, 
+        email: newUser.email,
+        student_id: newUser.student_id
       }, 
       process.env.JWT_SECRET, 
-      { expiresIn: "7d" } // Longer expiry for better UX
+      { expiresIn: "7d" }
     );
 
     res.status(201).json({ 
@@ -89,10 +108,10 @@ exports.register = async (req, res) => {
       message: "Student registered successfully",
       token: token,
       user: {
-        id: result.insertId,
-        full_name: full_name,
-        email: email,
-        student_id: student_id
+        id: newUser.id,
+        full_name: newUser.full_name,
+        email: newUser.email,
+        student_id: newUser.student_id
       }
     });
   } catch (err) {
@@ -116,12 +135,22 @@ exports.login = async (req, res) => {
   }
 
   try {
-    const [users] = await db.execute(
-      "SELECT id, full_name, email, student_id, password_hash FROM students WHERE email = ?", 
-      [email.toLowerCase().trim()]
-    );
-    
-    const user = users[0];
+    // Get user - UPDATED for Supabase
+    const { data: user, error } = await db
+      .from('students')
+      .select('id, full_name, email, student_id, password_hash')
+      .eq('email', email.toLowerCase().trim())
+      .single();
+
+    if (error) {
+      if (error.code === 'PGRST116') { // No user found
+        return res.status(401).json({ 
+          success: false,
+          message: "Invalid email or password" 
+        });
+      }
+      throw error;
+    }
 
     if (!user) {
       return res.status(401).json({ 
@@ -170,13 +199,23 @@ exports.login = async (req, res) => {
 
 exports.getProfile = async (req, res) => {
   try {
-    const [users] = await db.execute(
-      "SELECT id, full_name, email, student_id, created_at FROM students WHERE id = ?",
-      [req.user.id]
-    );
-    
-    const user = users[0];
-    
+    // Get user profile - UPDATED for Supabase
+    const { data: user, error } = await db
+      .from('students')
+      .select('id, full_name, email, student_id, created_at')
+      .eq('id', req.user.id)
+      .single();
+
+    if (error) {
+      if (error.code === 'PGRST116') {
+        return res.status(404).json({
+          success: false,
+          message: "User not found"
+        });
+      }
+      throw error;
+    }
+
     if (!user) {
       return res.status(404).json({
         success: false,

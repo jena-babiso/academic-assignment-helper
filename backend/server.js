@@ -2,13 +2,19 @@
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
-const db = require('./config/db');
+const { createClient } = require('@supabase/supabase-js'); // Added Supabase
 
 const authRoutes = require('./routes/auth');
 const uploadRoutes = require('./routes/upload');
 const analysisRoutes = require('./routes/analysis');
 
 dotenv.config();
+
+// Initialize Supabase Client
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_ANON_KEY
+);
 
 const app = express();
 
@@ -50,20 +56,26 @@ async function callDeepSeekAPI(messages) {
     }
 }
 
-// Health check route
+// Health check route - UPDATED for Supabase
 app.get('/health', async (req, res) => {
     try {
-        // Simple database check
-        await db.execute('SELECT 1');
-        
+        // Test Supabase connection instead of MySQL
+        const { data, error } = await supabase
+            .from('students')
+            .select('count')
+            .limit(1);
+
         // Check if DeepSeek API key is configured
         const apiKeyStatus = process.env.DEEPSEEK_API_KEY ? 'Configured' : 'Not configured';
+        const supabaseStatus = error ? 'Disconnected' : 'Connected';
+        const n8nStatus = process.env.N8N_WEBHOOK_URL ? 'Configured' : 'Not configured';
         
         res.status(200).json({ 
             status: 'OK', 
             message: 'Server is running',
-            database: 'Connected',
+            database: supabaseStatus,
             deepseek_api: apiKeyStatus,
+            n8n_webhook: n8nStatus,
             timestamp: new Date().toISOString()
         });
     } catch (error) {
@@ -119,7 +131,43 @@ app.post('/api/test-deepseek', async (req, res) => {
     }
 });
 
-// Academic analysis using DeepSeek
+// NEW: RAG-based source search endpoint (Required by project specs)
+app.get('/api/sources', async (req, res) => {
+    try {
+        const { query } = req.query;
+        
+        if (!query) {
+            return res.status(400).json({
+                success: false,
+                message: 'Query parameter is required'
+            });
+        }
+
+        // For now, return basic search - we'll implement vector search later
+        const { data: sources, error } = await supabase
+            .from('academic_sources')
+            .select('*')
+            .textSearch('title', query)
+            .limit(5);
+
+        if (error) throw error;
+
+        res.json({
+            success: true,
+            sources: sources || [],
+            query: query
+        });
+        
+    } catch (error) {
+        console.error('Source Search Error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to search academic sources'
+        });
+    }
+});
+
+// Academic analysis using DeepSeek - ENHANCED for RAG
 app.post('/api/analyze-academic', async (req, res) => {
     try {
         const { text, analysisType = 'general' } = req.body;
@@ -145,6 +193,14 @@ app.post('/api/analyze-academic', async (req, res) => {
 2. Key supporting points
 3. Writing quality assessment
 4. Suggestions for improvement
+
+Text: ${text}`,
+
+            'plagiarism': `Analyze this text for potential plagiarism issues. Check for:
+1. Unoriginal content
+2. Poor paraphrasing
+3. Missing citations
+4. Similarity to common academic sources
 
 Text: ${text}`,
 
@@ -201,7 +257,7 @@ app.use('/auth', authRoutes);
 app.use('/upload', uploadRoutes);
 app.use('/analysis', analysisRoutes);
 
-// ✅ FIXED: 404 handler - Remove the '*' parameter
+// 404 handler
 app.use((req, res) => {
     res.status(404).json({ 
         success: false,
@@ -224,7 +280,13 @@ app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
     console.log(`📍 Health check: http://localhost:${PORT}/health`);
     console.log(`🌐 CORS enabled for: ${process.env.FRONTEND_URL || 'http://localhost:3000'}`);
+    console.log(`🗄️  Supabase: ${process.env.SUPABASE_URL ? 'Connected' : 'Not configured'}`);
     console.log(`🤖 DeepSeek API: ${process.env.DEEPSEEK_API_KEY ? 'Configured' : 'Not configured'}`);
+    console.log(`⚡ n8n Webhook: ${process.env.N8N_WEBHOOK_URL ? 'Configured' : 'Not configured'}`);
 });
 
-module.exports = { callDeepSeekAPI };
+// Export for use in other files
+module.exports = { 
+    callDeepSeekAPI,
+    supabase // Export Supabase client for controllers
+};
